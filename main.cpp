@@ -5,19 +5,30 @@
 #include <ctime>
 #include <iomanip>
 #include <conio.h>
+#include <mutex>
+#include <condition_variable>
 
 using namespace std;
+
+std::mutex Mymutex;
+std::condition_variable cv;
+bool pilotCommand = false;
+bool isSmoke = false;
 
 class FuelSensor
 {
 private:
-    mutable int fuelValue = 250;
+    mutable int fuelValue = 75;
     mutable int warningCount = 0;
 
 public:
     double readFuel()
     {
-        fuelValue -= std::rand() % 26 + 10;
+        fuelValue -= std::rand() % 5 + 1;
+        if (fuelValue <= 0)
+        {
+            fuelValue = 75;
+        }
         fuelWithinRange();
         return fuelValue;
     }
@@ -26,7 +37,6 @@ public:
     {
         if (fuelValue < 25)
         {
-            incrementWarnings();
             return false;
         }
         else
@@ -117,22 +127,39 @@ public:
         return warningCountTemperature;
     }
 };
-
-class SmokeDetector1
+class SmokeDetector
 {
+private:
+    vector<std::string> warningMessages = {"none", "none"};
+
 public:
-    bool detectSmoke() const
+    void initSmoke1()
     {
-        return true;
+        warningMessages[0] = "\033[33mWARNING ...... LEFT ENGINE IS ON FIRE ! ...... WARNING\033[0m";
+        isSmoke = true;
     }
-};
 
-class SmokeDetector2
-{
-public:
-    bool detectSmoke() const
+    void initSmoke2()
     {
-        return false;
+        warningMessages[1] = "\033[33mWARNING ...... RIGHT ENGINE IS ON FIRE ! ...... WARNING\033[0m";
+        isSmoke = true;
+    }
+
+    void clearSmoke1()
+    {
+        warningMessages[0] = "none";
+        isSmoke = false;
+    }
+    void clearSmoke2()
+    {
+        warningMessages[1] = "none";
+        isSmoke = false;
+    }
+
+    vector<std::string> returnWarningMessages()
+    {
+
+        return warningMessages;
     }
 };
 
@@ -149,7 +176,7 @@ public:
                        ", Pressure level : " + std::to_string(pressureValue);
         cout << "\n\n\n";
 
-        cout << "----------AIRCRAFT SENSOR VALUES----------\n";
+        cout << "-------------------AIRCRAFT SENSOR VALUES-------------------\n";
 
         cout << printMessage << endl;
     }
@@ -159,33 +186,51 @@ class PilotCommand
 {
 private:
     string inputDemand;
+    SmokeDetector smokeDetector;
 
 public:
     void getCommands()
     {
-        while (true)
+
+        cout << "\n\n\n";
+        cout << "COMMAND SYSTEM\n";
+        cout << "1. Smoke1\n";
+        cout << "2. Smoke2\n";
+
+        cout << "a. clear Smoke 1\n";
+        cout << "b. clear Smoke 2\n";
+        cout << "x. Acknowledge All Messages\n";
+
+        if (_kbhit())
         {
-            cout << "\n\n\n";
-            cout << "COMMAND SYSTEM\n";
-            cout << "1. Smoke1\n";
-            cout << "2. Smoke2\n";
+            inputDemand = _getch();
 
-            if (_kbhit())
+            if (inputDemand == "1")
             {
-                inputDemand = _getch();
-
-                if (inputDemand == "1")
-                {
-                    std::cout << "WARNING Smoke1\n";
-                }
-                else if (inputDemand == "2")
-                {
-                    std::cout << "WARNING Smoke2\n";
-                }
+                smokeDetector.initSmoke1();
             }
-
-            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            else if (inputDemand == "2")
+            {
+                smokeDetector.initSmoke2();
+            }
+            else if (inputDemand == "a")
+            {
+                smokeDetector.clearSmoke1();
+            }
+            else if (inputDemand == "b")
+            {
+                smokeDetector.clearSmoke2();
+            }
         }
+    }
+    vector<std::string> getWarningMessages()
+    {
+        return smokeDetector.returnWarningMessages();
+    }
+
+    void displayMessage(string message)
+    {
+        cout << message << endl;
     }
 };
 
@@ -194,10 +239,10 @@ class Lamps
 private:
     EngineSensor engineSensor;
     FuelSensor fuelSensor;
-    string tLampMess, pLampMess, fLampMess = "";
+    string tLampMess, pLampMess, fLampMess, sLampMess = "";
 
 public:
-    void getTempLamp(int tLamp, int pLamp, int fLamp)
+    void getTempLamp(int tLamp, int pLamp, int fLamp, int sLamp)
     {
 
         if (tLamp >= 3)
@@ -224,11 +269,20 @@ public:
         {
             fLampMess = "\033[32mFuel\033[0m";
         }
+        if (sLamp >= 1)
+        {
+            sLampMess = "\033[31mSmoke\033[0m";
+        }
+        else
+        {
+            sLampMess = "\033[32mSmoke\033[0m";
+        }
         cout << "\n\n\n";
 
-        cout << "----------AIRCRAFT LAMP SYSTEM----------\n";
+        cout << "------AIRCRAFT LAMP SYSTEM------\n";
 
-        cout << fLampMess << ", " << tLampMess << ", " << pLampMess << endl;
+        cout << fLampMess << ", " << tLampMess << ", " << pLampMess
+             << ", " << sLampMess << endl;
     }
 };
 
@@ -237,68 +291,84 @@ class AircraftSystem
 private:
     EngineSensor engineSensor;
     FuelSensor fuelSensor;
-    SmokeDetector1 smokeDetector1;
-    SmokeDetector2 smokeDetector2;
     Dials readDials;
     Lamps lamps;
+    SmokeDetector smoke;
 
 public:
     void performMonitoring()
     {
 
-        int tLamp, pLamp, fLamp;
+        int tLamp, pLamp, fLamp, sLamp;
 
-        while (true)
+        double enginePressure = engineSensor.readPressure();
+        double engineTemperature = engineSensor.readTemperature();
+        double aircraftFuel = fuelSensor.readFuel();
+
+        if (!enginePressure)
         {
-
-            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-
-            double enginePressure = engineSensor.readPressure();
-            double engineTemperature = engineSensor.readTemperature();
-            double aircraftFuel = fuelSensor.readFuel();
-
-            bool isSmokeDetected1 = smokeDetector1.detectSmoke();
-            bool isSmokeDetected2 = smokeDetector2.detectSmoke();
-
-            if (!enginePressure)
-            {
-                engineSensor.incrementWarningsPressure();
-            }
-            else if (!engineTemperature)
-            {
-                engineSensor.incrementWarningsTemperature();
-            }
-            else if (!aircraftFuel)
-            {
-                fuelSensor.incrementWarnings();
-            }
-
-            tLamp = engineSensor.getWarningCountsTemperature();
-            pLamp = engineSensor.getWarningCountsPressure();
-            fLamp = fuelSensor.getWarningCounts();
-
-            readDials.printDials(enginePressure, engineTemperature, aircraftFuel);
-
-            lamps.getTempLamp(tLamp, pLamp, fLamp);
-
-            // displayWarnings();
+            engineSensor.incrementWarningsPressure();
         }
+        else if (!engineTemperature)
+        {
+            engineSensor.incrementWarningsTemperature();
+        }
+        else if (!aircraftFuel)
+        {
+            fuelSensor.incrementWarnings();
+        }
+
+        tLamp = engineSensor.getWarningCountsTemperature();
+        pLamp = engineSensor.getWarningCountsPressure();
+        fLamp = fuelSensor.getWarningCounts();
+
+        sLamp = 0;
+
+        if (isSmoke == true)
+        {
+            sLamp = 1;
+        }
+
+        readDials.printDials(enginePressure, engineTemperature, aircraftFuel);
+
+        lamps.getTempLamp(tLamp, pLamp, fLamp, sLamp);
     }
 };
 
 int main()
 {
-    srand(static_cast<unsigned>(time(nullptr)));
-
     AircraftSystem aircraftSystem;
     PilotCommand pilotCommands;
 
-    thread monitoringThread(&AircraftSystem::performMonitoring, &aircraftSystem);
+    vector<std::string> smokeWarnings;
 
-    thread commandsThread(&PilotCommand::getCommands, &pilotCommands);
+    while (true)
+    {
+        smokeWarnings = pilotCommands.getWarningMessages();
+        if (smokeWarnings[0] != "none")
+        {
+            pilotCommands.displayMessage(smokeWarnings[0]);
+        }
+        if (smokeWarnings[1] != "none")
+        {
+            pilotCommands.displayMessage(smokeWarnings[1]);
+        }
 
-    // commandsThread.join();
-    monitoringThread.join();
+        {
+            std::unique_lock<std::mutex> lock(Mymutex);
+            std::thread monitoringThread(&AircraftSystem::performMonitoring, &aircraftSystem);
+            monitoringThread.join();
+        }
 
+        {
+            std::unique_lock<std::mutex> lock(Mymutex);
+            std::thread commandsThread(&PilotCommand::getCommands, &pilotCommands);
+            commandsThread.join();
+        }
+
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+
+        std::cout << "\033[2J\033[1;1H" << flush;
+    }
     return 0;
 }
