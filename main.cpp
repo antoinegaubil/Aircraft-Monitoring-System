@@ -4,30 +4,51 @@
 #include <chrono>
 #include <ctime>
 #include <iomanip>
-#include <conio.h>
 #include <mutex>
 #include <condition_variable>
+#include <sys/neutrino.h>
+#include <sys/iofunc.h>
+#include <sys/dispatch.h>
+#include <atomic>
+#include <ncurses.h>
 
 using namespace std;
 
 std::mutex Mymutex;
+std::mutex coutMutex;
 std::condition_variable cv;
 bool pilotCommand = false;
 bool isSmoke = false;
+pthread_mutex_t sensor_values_mutex;
+pthread_mutex_t console_mutex;
+
+int fuelValue = 250;
+int pressureValue = 25;
+int temperatureValue = 500;
 
 class FuelSensor
 {
 private:
-    mutable int fuelValue = 75;
     mutable int warningCount = 0;
+    struct MyMessage
+    {
+        int type;
+        double data;
+    };
 
 public:
+    static void *ThreadEntryRead(void *arg)
+    {
+        FuelSensor *fuelSensor = static_cast<FuelSensor *>(arg);
+        fuelSensor->readFuel();
+        return nullptr;
+    }
     double readFuel()
     {
         fuelValue -= std::rand() % 5 + 1;
         if (fuelValue <= 0)
         {
-            fuelValue = 75;
+            fuelValue = 250;
         }
         fuelWithinRange();
         return fuelValue;
@@ -37,6 +58,7 @@ public:
     {
         if (fuelValue < 25)
         {
+            incrementWarnings();
             return false;
         }
         else
@@ -59,13 +81,16 @@ public:
 class EngineSensor
 {
 private:
-    mutable int pressureValue = 25;
-    mutable int temperatureValue = 30;
-
     mutable int warningCountPressure = 0;
     mutable int warningCountTemperature = 0;
 
 public:
+    static void *ThreadEntryReadP(void *arg)
+    {
+        EngineSensor *engineSensor = static_cast<EngineSensor *>(arg);
+        engineSensor->readPressure();
+        return nullptr;
+    }
     double readPressure()
     {
         pressureValue += std::rand() % 21 - 10;
@@ -94,6 +119,12 @@ public:
     int getWarningCountsPressure()
     {
         return warningCountPressure;
+    }
+    static void *ThreadEntryReadT(void *arg)
+    {
+        EngineSensor *engineSensore = static_cast<EngineSensor *>(arg);
+        engineSensore->readTemperature();
+        return nullptr;
     }
 
     double readTemperature()
@@ -189,39 +220,61 @@ private:
     SmokeDetector smokeDetector;
 
 public:
+    static void *threadEntryPoint(void *arg)
+    {
+        PilotCommand *pilotCommands = static_cast<PilotCommand *>(arg);
+        pilotCommands->getCommands();
+        return nullptr;
+    }
+    bool key_pressed()
+    {
+        return std::cin.rdbuf()->in_avail() != 0;
+    }
+
+    // Function to get a key without blocking
+    char get_key()
+    {
+        char ch;
+        std::cin.get(ch);
+        return ch;
+    }
+
     void getCommands()
     {
+        pthread_mutex_lock(&console_mutex);
+        std::cout << "\n\n\n";
+        std::cout << "COMMAND SYSTEM\n";
+        std::cout << "1. Smoke1\n";
+        std::cout << "2. Smoke2\n";
+        std::cout << "a. clear Smoke 1\n";
+        std::cout << "b. clear Smoke 2\n";
+        std::cout << "x. Acknowledge All Messages\n";
 
-        cout << "\n\n\n";
-        cout << "COMMAND SYSTEM\n";
-        cout << "1. Smoke1\n";
-        cout << "2. Smoke2\n";
-
-        cout << "a. clear Smoke 1\n";
-        cout << "b. clear Smoke 2\n";
-        cout << "x. Acknowledge All Messages\n";
-
-        if (_kbhit())
+        if (key_pressed())
         {
-            inputDemand = _getch();
+            char inputDemand = get_key();
+            cout << inputDemand;
 
-            if (inputDemand == "1")
+            switch (inputDemand)
             {
+            case '1':
                 smokeDetector.initSmoke1();
-            }
-            else if (inputDemand == "2")
-            {
+                break;
+            case '2':
                 smokeDetector.initSmoke2();
-            }
-            else if (inputDemand == "a")
-            {
+                break;
+            case 'a':
                 smokeDetector.clearSmoke1();
-            }
-            else if (inputDemand == "b")
-            {
+                break;
+            case 'b':
                 smokeDetector.clearSmoke2();
+                break;
+            default:
+                // Handle other keys if needed
+                break;
             }
         }
+        pthread_mutex_unlock(&console_mutex);
     }
     vector<std::string> getWarningMessages()
     {
@@ -247,35 +300,35 @@ public:
 
         if (tLamp >= 3)
         {
-            tLampMess = "\033[31mTemperature\033[0m";
+            tLampMess = "Temperature : RED";
         }
         else
         {
-            tLampMess = "\033[32mTemperature\033[0m";
+            tLampMess = "Temperature : GREEN";
         }
         if (pLamp >= 3)
         {
-            pLampMess = "\033[31mPressure\033[0m";
+            pLampMess = "Pressure : RED";
         }
         else
         {
-            pLampMess = "\033[32mPressure\033[0m";
+            pLampMess = "Pressure : GREEN";
         }
         if (fLamp >= 3)
         {
-            fLampMess = "\033[31mFuel\033[0m";
+            fLampMess = "Fuel : RED";
         }
         else
         {
-            fLampMess = "\033[32mFuel\033[0m";
+            fLampMess = "Fuel : GREEN";
         }
         if (sLamp >= 1)
         {
-            sLampMess = "\033[31mSmoke\033[0m";
+            sLampMess = "Smoke : RED";
         }
         else
         {
-            sLampMess = "\033[32mSmoke\033[0m";
+            sLampMess = "Smoke : GREEN";
         }
         cout << "\n\n\n";
 
@@ -294,29 +347,43 @@ private:
     Dials readDials;
     Lamps lamps;
     SmokeDetector smoke;
+    pthread_t readFuel;
+    pthread_t readTemperature;
+    pthread_t readPressure;
+
+    int rcvid_c;
+    struct MyMessage
+    {
+        int type;
+        double data;
+    };
+    int tLamp, pLamp, fLamp, sLamp;
+    double receivedFuelValue;
 
 public:
+    static void *threadEntryPoint(void *arg)
+    {
+
+        AircraftSystem *aircraftSystem = static_cast<AircraftSystem *>(arg);
+        aircraftSystem->performMonitoring();
+        return nullptr;
+    }
+
     void performMonitoring()
     {
 
-        int tLamp, pLamp, fLamp, sLamp;
+        pthread_mutex_lock(&sensor_values_mutex);
 
-        double enginePressure = engineSensor.readPressure();
-        double engineTemperature = engineSensor.readTemperature();
-        double aircraftFuel = fuelSensor.readFuel();
+        pthread_create(&readFuel, NULL, &FuelSensor::ThreadEntryRead, &fuelSensor);
+        pthread_join(readFuel, NULL);
 
-        if (!enginePressure)
-        {
-            engineSensor.incrementWarningsPressure();
-        }
-        else if (!engineTemperature)
-        {
-            engineSensor.incrementWarningsTemperature();
-        }
-        else if (!aircraftFuel)
-        {
-            fuelSensor.incrementWarnings();
-        }
+        pthread_create(&readPressure, NULL, &EngineSensor::ThreadEntryReadP, &engineSensor);
+        pthread_join(readPressure, NULL);
+
+        pthread_create(&readTemperature, NULL, &EngineSensor::ThreadEntryReadT, &engineSensor);
+        pthread_join(readTemperature, NULL);
+
+        pthread_mutex_unlock(&sensor_values_mutex);
 
         tLamp = engineSensor.getWarningCountsTemperature();
         pLamp = engineSensor.getWarningCountsPressure();
@@ -329,9 +396,10 @@ public:
             sLamp = 1;
         }
 
-        readDials.printDials(enginePressure, engineTemperature, aircraftFuel);
-
+        pthread_mutex_lock(&console_mutex);
+        readDials.printDials(pressureValue, temperatureValue, fuelValue);
         lamps.getTempLamp(tLamp, pLamp, fLamp, sLamp);
+        pthread_mutex_unlock(&console_mutex);
     }
 };
 
@@ -341,6 +409,9 @@ int main()
     PilotCommand pilotCommands;
 
     vector<std::string> smokeWarnings;
+
+    pthread_t monitoringThread;
+    pthread_t commandsThread;
 
     while (true)
     {
@@ -354,21 +425,15 @@ int main()
             pilotCommands.displayMessage(smokeWarnings[1]);
         }
 
-        {
-            std::unique_lock<std::mutex> lock(Mymutex);
-            std::thread monitoringThread(&AircraftSystem::performMonitoring, &aircraftSystem);
-            monitoringThread.join();
-        }
-
-        {
-            std::unique_lock<std::mutex> lock(Mymutex);
-            std::thread commandsThread(&PilotCommand::getCommands, &pilotCommands);
-            commandsThread.join();
-        }
+        pthread_create(&monitoringThread, NULL, &AircraftSystem::threadEntryPoint, &aircraftSystem);
+        pthread_create(&commandsThread, NULL, &PilotCommand::threadEntryPoint, &pilotCommands);
 
         std::this_thread::sleep_for(std::chrono::seconds(1));
 
-        std::cout << "\033[2J\033[1;1H" << flush;
+        // std::cout << "\033[2J\033[1;1H" << std::flush;
+
+        pthread_join(monitoringThread, NULL);
+        pthread_join(commandsThread, NULL);
     }
     return 0;
 }
