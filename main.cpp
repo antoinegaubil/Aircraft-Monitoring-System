@@ -11,6 +11,13 @@
 #include <sys/dispatch.h>
 #include <atomic>
 #include <ncurses.h>
+#include <cstdlib>
+#include <unistd.h>
+#include <fcntl.h>
+#include <devctl.h>
+#include <sys/ioctl.h>
+#include <vector>
+#include <numeric>
 
 using namespace std;
 
@@ -21,10 +28,25 @@ bool pilotCommand = false;
 bool isSmoke = false;
 pthread_mutex_t sensor_values_mutex;
 pthread_mutex_t console_mutex;
-
+int tLamp, pLamp, fLamp, sLamp;
 int fuelValue = 250;
 int pressureValue = 25;
 int temperatureValue = 500;
+double elapsed_time;
+bool boolPrintRates = false;
+
+bool warningFuel = false;
+bool fuelIgn = false;
+bool warningTemp = false;
+bool tempIgn = false;
+bool warningPres = false;
+bool presIgn = false;
+
+std::vector<int> allFuel;
+std::vector<int> allTemp;
+std::vector<int> allPres;
+
+volatile char userInputValue;
 
 class FuelSensor
 {
@@ -51,6 +73,7 @@ public:
             fuelValue = 250;
         }
         fuelWithinRange();
+        allFuel.push_back(fuelValue);
         return fuelValue;
     }
 
@@ -95,6 +118,7 @@ public:
     {
         pressureValue += std::rand() % 21 - 10;
         pressureWithinRange();
+        allPres.push_back(pressureValue);
         return pressureValue;
     }
 
@@ -131,6 +155,7 @@ public:
     {
         temperatureValue += std::rand() % 21 - 10;
         temperatureWithinRange();
+        allTemp.push_back(temperatureValue);
         return temperatureValue;
     }
 
@@ -164,27 +189,65 @@ private:
     vector<std::string> warningMessages = {"none", "none"};
 
 public:
+    static void *threadEntrySmoke1(void *arg)
+    {
+
+        SmokeDetector *smokeDetector = static_cast<SmokeDetector *>(arg);
+        smokeDetector->initSmoke1();
+        return nullptr;
+    }
     void initSmoke1()
     {
-        warningMessages[0] = "\033[33mWARNING ...... LEFT ENGINE IS ON FIRE ! ...... WARNING\033[0m";
+
+        warningMessages[0] = "WARNING ...... LEFT ENGINE IS ON FIRE ! ...... WARNING";
+
         isSmoke = true;
+    }
+    static void *threadEntrySmoke2(void *arg)
+    {
+
+        SmokeDetector *smokeDetector = static_cast<SmokeDetector *>(arg);
+        smokeDetector->initSmoke2();
+        return nullptr;
     }
 
     void initSmoke2()
     {
-        warningMessages[1] = "\033[33mWARNING ...... RIGHT ENGINE IS ON FIRE ! ...... WARNING\033[0m";
+        warningMessages[1] = "WARNING ...... RIGHT ENGINE IS ON FIRE ! ...... WARNING";
+
         isSmoke = true;
+    }
+    static void *threadEntryClear1(void *arg)
+    {
+
+        SmokeDetector *smokeDetector = static_cast<SmokeDetector *>(arg);
+        smokeDetector->clearSmoke1();
+        return nullptr;
     }
 
     void clearSmoke1()
     {
         warningMessages[0] = "none";
-        isSmoke = false;
+        if (warningMessages[1] == "none")
+        {
+            isSmoke = false;
+        }
     }
+    static void *threadEntryClear2(void *arg)
+    {
+
+        SmokeDetector *smokeDetector = static_cast<SmokeDetector *>(arg);
+        smokeDetector->clearSmoke2();
+        return nullptr;
+    }
+
     void clearSmoke2()
     {
         warningMessages[1] = "none";
-        isSmoke = false;
+        if (warningMessages[0] == "none")
+        {
+            isSmoke = false;
+        }
     }
 
     vector<std::string> returnWarningMessages()
@@ -194,22 +257,72 @@ public:
     }
 };
 
+class Timer
+{
+public:
+    Timer() : start_time(std::chrono::high_resolution_clock::now()) {}
+
+    void reset()
+    {
+        start_time = std::chrono::high_resolution_clock::now();
+    }
+
+    double elapsed() const
+    {
+        auto current_time = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(current_time - start_time);
+        return duration.count() * 1e-6;
+    }
+
+private:
+    std::chrono::high_resolution_clock::time_point start_time;
+};
+
 class Dials
 {
 private:
     string printMessage;
+    double fuelRate;
+    double tempRate;
+    double presRate;
+    Timer timer;
 
 public:
+    static void *threadGetDials(void *arg)
+    {
+        Dials *dials = static_cast<Dials *>(arg);
+        dials->printDials(pressureValue, temperatureValue, fuelValue);
+        return nullptr;
+    }
     void printDials(int pressureValue, int temperatureValue, int fuelValue)
     {
         printMessage = "Fuel level : " + std::to_string(fuelValue) +
-                       ",Temperature level : " + std::to_string(temperatureValue) +
-                       ", Pressure level : " + std::to_string(pressureValue);
+                       "L,Temperature level : " + std::to_string(temperatureValue) +
+                       "°C, Pressure level : " + std::to_string(pressureValue) + "Pa";
         cout << "\n\n\n";
 
-        cout << "-------------------AIRCRAFT SENSOR VALUES-------------------\n";
+        cout << "--------------------AIRCRAFT SENSOR VALUES--------------------\n";
 
         cout << printMessage << endl;
+
+        if (boolPrintRates == true)
+        {
+            printRates();
+
+            cout << "\n\n\n-----------------------AIRCRAFT RATE VALUES-----------------------\n";
+            cout << "Fuel Rate : " << fuelRate << "L/s, "
+                 << "Temperature Rate : " << tempRate << "°C/s, "
+                 << "Pressure Rate : " << presRate << "Pa/s" << endl;
+        }
+    }
+
+    void printRates()
+    {
+        elapsed_time = timer.elapsed();
+
+        fuelRate = (allFuel.back() - allFuel.front()) / elapsed_time; // current value - initial value / time in s
+        presRate = (allPres.back() - allPres.front()) / elapsed_time;
+        tempRate = (allTemp.back() - allTemp.front()) / elapsed_time;
     }
 };
 
@@ -218,6 +331,18 @@ class PilotCommand
 private:
     string inputDemand;
     SmokeDetector smokeDetector;
+    Dials dials;
+    int flag = 0;
+    string input;
+    pthread_t initSmoke1;
+    pthread_t initSmoke2;
+    pthread_t clearSmoke1;
+    pthread_t clearSmoke2;
+    vector<std::string> smokeWarnings;
+    pthread_t pilotRequest;
+    Timer timer;
+    pthread_t rates;
+    double elapsed_time;
 
 public:
     static void *threadEntryPoint(void *arg)
@@ -226,59 +351,106 @@ public:
         pilotCommands->getCommands();
         return nullptr;
     }
-    bool key_pressed()
-    {
-        return std::cin.rdbuf()->in_avail() != 0;
-    }
-
-    // Function to get a key without blocking
-    char get_key()
-    {
-        char ch;
-        std::cin.get(ch);
-        return ch;
-    }
 
     void getCommands()
     {
+        elapsed_time = timer.elapsed();
+        cout << "---------------------AIRCRAFT WARNINGS---------------------\n";
         pthread_mutex_lock(&console_mutex);
+        smokeWarnings = smokeDetector.returnWarningMessages();
+
+        if (smokeWarnings[0] != "none")
+        {
+            displayMessage(smokeWarnings[0]);
+        }
+        if (smokeWarnings[1] != "none")
+        {
+            displayMessage(smokeWarnings[1]);
+        }
+        if (warningFuel == true && !fuelIgn)
+        {
+            displayMessage("FUEL IN THE RED ... press x ignore");
+        }
+        if (warningPres == true && !presIgn)
+        {
+            displayMessage("PRESSURE IN THE RED ... press x ignore");
+        }
+        if (warningTemp == true && !tempIgn)
+        {
+            displayMessage("TEMPERATURE IN THE RED ... press x ignore");
+        }
+
         std::cout << "\n\n\n";
         std::cout << "COMMAND SYSTEM\n";
-        std::cout << "1. Smoke1\n";
-        std::cout << "2. Smoke2\n";
+        cout << "v. Get Rates\n";
+        cout << "c. Clear Rates\n";
+        std::cout << "1. Simulate Smoke1\n";
+        std::cout << "2. Simulate Smoke2\n";
         std::cout << "a. clear Smoke 1\n";
         std::cout << "b. clear Smoke 2\n";
-        std::cout << "x. Acknowledge All Messages\n";
 
-        if (key_pressed())
+        // pthread_create(&pilotRequest, NULL, &UserInput::userInputThread, &userInput);
+        // pthread_detach(pilotRequest);
+
+        int fd = STDIN_FILENO;
+        int bytesAvailable;
+        int ret = devctl(fd, FIONREAD, &bytesAvailable, sizeof(bytesAvailable), NULL);
+
+        if (bytesAvailable > 0)
         {
-            char inputDemand = get_key();
-            cout << inputDemand;
+            std::cin >> input;
+        }
 
-            switch (inputDemand)
+        if (input == "v")
+        {
+            boolPrintRates = true;
+        }
+        else if (input == "1")
+        {
+            pthread_create(&initSmoke1, NULL, &SmokeDetector::threadEntrySmoke1, &smokeDetector);
+            pthread_detach(initSmoke1);
+        }
+        else if (input == "2")
+        {
+            pthread_create(&initSmoke2, NULL, &SmokeDetector::threadEntrySmoke2, &smokeDetector);
+            pthread_detach(initSmoke2);
+        }
+        else if (input == "a")
+        {
+            pthread_create(&clearSmoke1, NULL, &SmokeDetector::threadEntryClear1, &smokeDetector);
+            pthread_detach(clearSmoke1);
+        }
+        else if (input == "b")
+        {
+            pthread_create(&clearSmoke2, NULL, &SmokeDetector::threadEntryClear2, &smokeDetector);
+            pthread_detach(clearSmoke2);
+        }
+        else if (input == "x")
+        {
+            if (warningFuel == true)
             {
-            case '1':
-                smokeDetector.initSmoke1();
-                break;
-            case '2':
-                smokeDetector.initSmoke2();
-                break;
-            case 'a':
-                smokeDetector.clearSmoke1();
-                break;
-            case 'b':
-                smokeDetector.clearSmoke2();
-                break;
-            default:
-                // Handle other keys if needed
-                break;
+                warningFuel = false;
+                fuelIgn = true;
+            }
+            if (warningTemp == true)
+            {
+                warningTemp = false;
+                tempIgn = true;
+            }
+            if (warningPres == true)
+            {
+                warningPres = false;
+                presIgn = true;
             }
         }
+        else if (input == "c")
+        {
+            boolPrintRates = false;
+        }
+
+        input = "";
+
         pthread_mutex_unlock(&console_mutex);
-    }
-    vector<std::string> getWarningMessages()
-    {
-        return smokeDetector.returnWarningMessages();
     }
 
     void displayMessage(string message)
@@ -295,12 +467,21 @@ private:
     string tLampMess, pLampMess, fLampMess, sLampMess = "";
 
 public:
+    static void *threadGetLamps(void *arg)
+    {
+        Lamps *lamps = static_cast<Lamps *>(arg);
+        lamps->getTempLamp(tLamp, pLamp, fLamp, sLamp);
+        return nullptr;
+    }
+
     void getTempLamp(int tLamp, int pLamp, int fLamp, int sLamp)
     {
 
         if (tLamp >= 3)
         {
+
             tLampMess = "Temperature : RED";
+            warningTemp = true;
         }
         else
         {
@@ -308,6 +489,7 @@ public:
         }
         if (pLamp >= 3)
         {
+            warningPres = true;
             pLampMess = "Pressure : RED";
         }
         else
@@ -316,6 +498,7 @@ public:
         }
         if (fLamp >= 3)
         {
+            warningFuel = true;
             fLampMess = "Fuel : RED";
         }
         else
@@ -332,7 +515,7 @@ public:
         }
         cout << "\n\n\n";
 
-        cout << "------AIRCRAFT LAMP SYSTEM------\n";
+        cout << "---------------------AIRCRAFT LAMP SYSTEM---------------------\n";
 
         cout << fLampMess << ", " << tLampMess << ", " << pLampMess
              << ", " << sLampMess << endl;
@@ -345,11 +528,15 @@ private:
     EngineSensor engineSensor;
     FuelSensor fuelSensor;
     Dials readDials;
-    Lamps lamps;
+    Lamps printLamps;
     SmokeDetector smoke;
     pthread_t readFuel;
     pthread_t readTemperature;
     pthread_t readPressure;
+
+    pthread_t lamps;
+
+    pthread_t dials;
 
     int rcvid_c;
     struct MyMessage
@@ -357,7 +544,7 @@ private:
         int type;
         double data;
     };
-    int tLamp, pLamp, fLamp, sLamp;
+
     double receivedFuelValue;
 
 public:
@@ -397,8 +584,12 @@ public:
         }
 
         pthread_mutex_lock(&console_mutex);
-        readDials.printDials(pressureValue, temperatureValue, fuelValue);
-        lamps.getTempLamp(tLamp, pLamp, fLamp, sLamp);
+        pthread_create(&dials, NULL, &Dials::threadGetDials, &readDials);
+        pthread_join(dials, NULL);
+
+        pthread_create(&lamps, NULL, &Lamps::threadGetLamps, &printLamps);
+        pthread_join(lamps, NULL);
+
         pthread_mutex_unlock(&console_mutex);
     }
 };
@@ -408,29 +599,20 @@ int main()
     AircraftSystem aircraftSystem;
     PilotCommand pilotCommands;
 
-    vector<std::string> smokeWarnings;
-
     pthread_t monitoringThread;
     pthread_t commandsThread;
 
     while (true)
     {
-        smokeWarnings = pilotCommands.getWarningMessages();
-        if (smokeWarnings[0] != "none")
-        {
-            pilotCommands.displayMessage(smokeWarnings[0]);
-        }
-        if (smokeWarnings[1] != "none")
-        {
-            pilotCommands.displayMessage(smokeWarnings[1]);
-        }
 
         pthread_create(&monitoringThread, NULL, &AircraftSystem::threadEntryPoint, &aircraftSystem);
         pthread_create(&commandsThread, NULL, &PilotCommand::threadEntryPoint, &pilotCommands);
 
         std::this_thread::sleep_for(std::chrono::seconds(1));
-
-        // std::cout << "\033[2J\033[1;1H" << std::flush;
+        for (int i = 0; i < 50; ++i)
+        {
+            std::cout << std::endl;
+        }
 
         pthread_join(monitoringThread, NULL);
         pthread_join(commandsThread, NULL);
