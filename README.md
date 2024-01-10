@@ -56,9 +56,6 @@ This C++ program simulates a real-time aircraft monitoring system using threads,
 
 - Compile and run the program using a C++ compiler.
   
-  \`\`\`bash
-  g++ -o aircraft_monitoring_system aircraft_monitoring_system.cpp -lncurses -lpthread
-  ./aircraft_monitoring_system
-  \`\`\`
+
 
 
